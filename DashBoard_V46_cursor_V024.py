@@ -1098,7 +1098,10 @@ def manage_tab_transitions():
                 st.session_state.range_reference_date = st.session_state.saved_date_range[1]
         else:
             reset_filters(full_start_date, full_end_date, reference_date_for_year)
-    
+    elif previous_tab == "불량유형별 분석" and current_tab != "불량유형별 분석":
+        # 불량유형별 탭 이탈 시에도 동일한 리셋 규칙 적용 (조회 연도 전체, 월별)
+        reset_filters(full_start_date, full_end_date, reference_date_for_year)
+
     # 패턴 2: 다른 탭에서 일일 보고서 탭으로 이동 (현재 설정 저장)
     elif current_tab == "📊 일일 생산 현황 보고" and previous_tab != "📊 일일 생산 현황 보고" and previous_tab is not None:
         # 현재 설정을 저장 (나중에 복원용)
