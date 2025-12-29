@@ -46,6 +46,28 @@ window.addEventListener('resize', adjustZoom);
 def load_all_data() -> Dict[str, Tuple[pd.DataFrame, Optional[str]]]:
     """파일 로딩 및 데이터 전처리"""
     data_frames = {}
+    def read_data_file(file_path: str) -> pd.DataFrame:
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext == '.csv':
+            df = pd.read_csv(file_path, encoding='utf-8-sig', thousands=',', skip_blank_lines=True)
+            df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+            df = df.dropna(axis=1, how='all')
+            df.columns = df.columns.str.strip()
+        else:
+            try:
+                df = pd.read_excel(file_path, engine='openpyxl')
+            except Exception:
+                df = pd.read_csv(file_path, encoding='utf-8-sig', thousands=',', skip_blank_lines=True)
+                df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+                df = df.dropna(axis=1, how='all')
+                df.columns = df.columns.str.strip()
+
+        for col in df.columns:
+            if df[col].dtype == 'object' and ('%' in str(df[col].iloc[0]) if not df[col].empty and df[col].iloc[0] is not None else False):
+                df[col] = df[col].astype(str).str.replace('%', '', regex=False).str.strip()
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
     keywords = {
         'target': '목표달성율', 
         'yield': '수율', 
@@ -91,40 +113,31 @@ def load_all_data() -> Dict[str, Tuple[pd.DataFrame, Optional[str]]]:
             relevant_files = csv_files if csv_files else xlsx_files
 
             if relevant_files:
+                if key == 'yield':
+                    year_pattern = re.compile(r"\(수율\)\(\d{4}년\)")
+                    yearly_csv_files = [f for f in csv_files if year_pattern.search(f)]
+                    yearly_xlsx_files = [f for f in xlsx_files if year_pattern.search(f)]
+                    yearly_files = yearly_csv_files if yearly_csv_files else yearly_xlsx_files
+                    if yearly_files:
+                        loaded_files = []
+                        dfs = []
+                        for f in sorted(yearly_files):
+                            file_path = os.path.join(current_directory, f)
+                            df = read_data_file(file_path)
+                            dfs.append(df)
+                            loaded_files.append(f)
+                        combined_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+                        data_frames[key] = (combined_df, ", ".join(loaded_files))
+                        continue
+
                 # (간편) 표기가 없는 최신 파일을 우선 선택
                 non_simple_files = [f for f in relevant_files if '간편' not in f]
                 search_pool = non_simple_files if non_simple_files else relevant_files
                 latest_file = max(search_pool, key=lambda f: os.path.getmtime(os.path.join(current_directory, f)))
 
                 file_path = os.path.join(current_directory, latest_file)
-                file_ext = os.path.splitext(latest_file)[1].lower()
+                df = read_data_file(file_path)
 
-                # 파일 형식에 따라 읽기
-                if file_ext == '.csv':
-                    # CSV 파일 읽기 (천단위 구분자 처리)
-                    df = pd.read_csv(file_path, encoding='utf-8-sig', thousands=',', skip_blank_lines=True)
-                    # Unnamed 컬럼 제거
-                    df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
-                    # 완전히 빈 컬럼 제거
-                    df = df.dropna(axis=1, how='all')
-                    # 컬럼명 공백 제거
-                    df.columns = df.columns.str.strip()
-                else:
-                    # Excel 파일 읽기
-                    try:
-                        df = pd.read_excel(file_path, engine='openpyxl')
-                    except Exception as excel_error:
-                        # Excel 읽기 실패 시 CSV로 재시도
-                        df = pd.read_csv(file_path, encoding='utf-8-sig', thousands=',', skip_blank_lines=True)
-                        df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
-                        df = df.dropna(axis=1, how='all')
-                        df.columns = df.columns.str.strip()
-                
-                for col in df.columns:
-                    if df[col].dtype == 'object' and ('%' in str(df[col].iloc[0]) if not df[col].empty and df[col].iloc[0] is not None else False):
-                        df[col] = df[col].astype(str).str.replace('%', '', regex=False).str.strip()
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                
                 if key == 'defect':
                     cols = pd.Series(df.columns)
                     for dup in cols[cols.duplicated()].unique():
@@ -2778,32 +2791,62 @@ elif selected_tab == "목표 달성률":
                         with chart_setting_cols[3]:
                             trend_chart_height = st.slider("차트 높이", min_value=400, max_value=1000, value=600, step=50, key="trend_chart_height")
                     
-                    df_resampled = get_resampled_data(df_merged, agg_level, ['목표_총_생산량', '총_양품수량']); df_trend = df_resampled[df_resampled['공정코드'] == '[80] 누수/규격검사'].copy()
+                    display_mode_target_trend = st.radio(
+                        "표시 방식",
+                        options=["공장별로 구분하여 표시", "전체 공장 합산하여 표시"],
+                        index=0,
+                        horizontal=True,
+                        key="target_trend_display_mode",
+                        help="공장별 구분: 공장별 달성률 라인을 각각 표시 / 전체 공장 합산: 모든 공장의 목표와 양품 실적을 합산한 달성률을 1개 라인으로 표시합니다."
+                    )
+
+                    df_resampled = get_resampled_data(df_merged, agg_level, ['목표_총_생산량', '총_양품수량'])
+                    df_trend = df_resampled[df_resampled['공정코드'] == '[80] 누수/규격검사'].copy()
                     if not df_trend.empty:
-                        with pd.option_context('mode.use_inf_as_na', True): df_trend['달성률(%)'] = (100 * df_trend['총_양품수량'] / df_trend['목표_총_생산량']).fillna(0)
-                        
-                        # 라벨 겹침 방지 로직
-                        df_trend = df_trend.sort_values(['period', '달성률(%)'], ascending=[True, False])
-                        positions = ['top center', 'bottom center', 'middle right', 'middle left', 'top right', 'bottom right']
-                        df_trend['text_position'] = df_trend.groupby('period').cumcount().apply(lambda i: positions[i % len(positions)])
-                        
+                        period_order = sorted(df_trend['period'].unique())
                         fig_trend = go.Figure()
 
-                        for factory_name in sorted(df_trend['공장'].unique()):
-                            df_factory = df_trend[df_trend['공장'] == factory_name].sort_values('period')
-                            factory_color = next((color for key, color in FACTORY_COLOR_MAP.items() if key in factory_name), '#888888')
+                        if display_mode_target_trend == "전체 공장 합산하여 표시":
+                            overall_trend_data = df_trend.groupby('period').agg({
+                                '목표_총_생산량': 'sum',
+                                '총_양품수량': 'sum'
+                            }).reset_index()
+                            with pd.option_context('mode.use_inf_as_na', True):
+                                overall_trend_data['달성률(%)'] = (100 * overall_trend_data['총_양품수량'] / overall_trend_data['목표_총_생산량']).fillna(0)
+                            overall_trend_data = overall_trend_data.sort_values('period')
 
                             fig_trend.add_trace(go.Scatter(
-                                x=df_factory['period'], y=df_factory['달성률(%)'], name=f'{factory_name} 달성률',
-                                mode='lines+markers+text', text=df_factory['달성률(%)'], texttemplate='%{text:.2f}%',
-                                textposition=df_factory['text_position'], 
-                                line=dict(color=factory_color), legendgroup=factory_name,
+                                x=overall_trend_data['period'], y=overall_trend_data['달성률(%)'], name='전체 달성률',
+                                mode='lines+markers+text', text=overall_trend_data['달성률(%)'], texttemplate='%{text:.2f}%',
+                                textposition='top center',
+                                line=dict(color='black', width=3),
+                                marker=dict(color='black'),
                                 textfont=dict(size=trend_label_size, color='black')
                             ))
+                        else:
+                            with pd.option_context('mode.use_inf_as_na', True):
+                                df_trend['달성률(%)'] = (100 * df_trend['총_양품수량'] / df_trend['목표_총_생산량']).fillna(0)
+
+                            # 라벨 겹침 방지 로직
+                            df_trend = df_trend.sort_values(['period', '달성률(%)'], ascending=[True, False])
+                            positions = ['top center', 'bottom center', 'middle right', 'middle left', 'top right', 'bottom right']
+                            df_trend['text_position'] = df_trend.groupby('period').cumcount().apply(lambda i: positions[i % len(positions)])
+
+                            for factory_name in sorted(df_trend['공장'].unique()):
+                                df_factory = df_trend[df_trend['공장'] == factory_name].sort_values('period')
+                                factory_color = next((color for key, color in FACTORY_COLOR_MAP.items() if key in factory_name), '#888888')
+
+                                fig_trend.add_trace(go.Scatter(
+                                    x=df_factory['period'], y=df_factory['달성률(%)'], name=f'{factory_name} 달성률',
+                                    mode='lines+markers+text', text=df_factory['달성률(%)'], texttemplate='%{text:.2f}%',
+                                    textposition=df_factory['text_position'],
+                                    line=dict(color=factory_color), legendgroup=factory_name,
+                                    textfont=dict(size=trend_label_size, color='black')
+                                ))
 
                         fig_trend.update_layout(height=trend_chart_height, title_text=f'<b>{agg_level} 완제품 달성률 추이 (양품 기준)</b>', margin=dict(t=120), legend=dict(orientation="h", yanchor="bottom", y=1.10, xanchor="right", x=1))
                         fig_trend.update_yaxes(title_text="<b>달성률 (%)</b>", autorange=True, title_font_size=trend_axis_title_size, tickfont_size=trend_axis_tick_size) # Y축 범위 자동 조정
-                        fig_trend.update_xaxes(type='category', categoryorder='array', categoryarray=sorted(df_trend['period'].unique()), title_text=f"<b>{agg_level.replace('별','')}</b>", title_font_size=trend_axis_title_size, tickfont_size=trend_axis_tick_size)
+                        fig_trend.update_xaxes(type='category', categoryorder='array', categoryarray=period_order, title_text=f"<b>{agg_level.replace('별','')}</b>", title_font_size=trend_axis_title_size, tickfont_size=trend_axis_tick_size)
                         
                         # 자동 라벨 겹침 방지 기능 활성화
                         fig_trend.update_traces(textfont_size=trend_label_size, textposition='top center')
@@ -3071,6 +3114,13 @@ elif selected_tab == "목표 달성률":
                             with col_set4:
                                 trend_analysis_chart_height = st.slider("차트 높이", min_value=400, max_value=1000, value=600, step=50, key="trend_analysis_chart_height")
 
+                        show_overall_with_factories = st.checkbox(
+                            "공장별 추세 그래프에 전체(공장 합산) 함께보기",
+                            value=False,
+                            key="trend_analysis_show_overall_with_factories",
+                            help="공장별 달성률 라인과 함께 전체 달성률 라인을 추가로 표시합니다."
+                        )
+
                         fig_trend = px.line(overall_trend.sort_values('period'), 
                                           x='period', y='전체달성률(%)', 
                                           title='<b>전체 목표달성률 추세</b>',
@@ -3094,6 +3144,18 @@ elif selected_tab == "목표 달성률":
                                                   x='period', y='달성률(%)', color='공장',
                                                   title='<b>공장별 목표달성률 추세 비교</b>',
                                                   markers=True, text='달성률(%)', height=trend_analysis_chart_height)
+                        if show_overall_with_factories:
+                            overall_sorted = overall_trend.sort_values('period')
+                            fig_factory_trend.add_trace(go.Scatter(
+                                x=overall_sorted['period'],
+                                y=overall_sorted['전체달성률(%)'],
+                                name='전체',
+                                mode='lines+markers+text',
+                                text=overall_sorted['전체달성률(%)'],
+                                line=dict(color='black', width=3),
+                                marker=dict(color='black'),
+                            ))
+
                         fig_factory_trend.update_traces(texttemplate='%{text:.1f}%', textposition='top center', textfont=dict(size=trend_analysis_label_size, color='black'))
                         fig_factory_trend.update_xaxes(type='category', title_font_size=trend_analysis_axis_title_size, tickfont_size=trend_analysis_axis_tick_size)
                         fig_factory_trend.update_yaxes(title_font_size=trend_analysis_axis_title_size, tickfont_size=trend_analysis_axis_tick_size)
@@ -5771,4 +5833,3 @@ elif selected_tab == "생산실적 상세조회":
         
         # 다운로드 섹션 추가
         create_download_section(df_filtered, "생산실적상세조회", agg_level, start_date, end_date)
-
